@@ -1,0 +1,552 @@
+#!/usr/bin/env python3
+"""
+Web Application Vulnerability Scanner
+A Python-based tool to identify common security vulnerabilities in web applications.
+
+Author: Security Scanner Tool
+Version: 1.0
+"""
+
+import requests
+import urllib.parse
+import ssl
+import socket
+import re
+import json
+import time
+import argparse
+from datetime import datetime
+from urllib.parse import urljoin, urlparse
+from typing import Dict, List, Optional, Tuple
+import warnings
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+
+# Suppress SSL warnings for testing
+warnings.filterwarnings('ignore', category=InsecureRequestWarning)
+
+class VulnerabilityScanner:
+    def __init__(self, target_url: str, timeout: int = 10):
+        self.target_url = target_url
+        self.timeout = timeout
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        })
+        self.vulnerabilities = []
+        
+        # Vulnerability database
+        self.vuln_database = {
+            'sql-injection': {
+                'name': 'SQL Injection',
+                'description': 'Application may be vulnerable to SQL injection attacks',
+                'impact': 'Attackers could access, modify, or delete database contents',
+                'recommendation': 'Use parameterized queries and input validation',
+                'severity': 'high',
+                'payloads': ["'", "1' OR '1'='1", "'; DROP TABLE users; --", "1' UNION SELECT NULL--", "admin'--", "' OR 1=1#"]
+            },
+            'xss': {
+                'name': 'Cross-Site Scripting (XSS)',
+                'description': 'Application may be vulnerable to XSS attacks',
+                'impact': 'Attackers could execute malicious scripts in user browsers',
+                'recommendation': 'Implement proper input validation and output encoding',
+                'severity': 'high',
+                'payloads': ["<script>alert('XSS')</script>", "<img src=x onerror=alert('XSS')>", "javascript:alert('XSS')", "<svg/onload=alert('XSS')>"]
+            },
+            'csrf': {
+                'name': 'CSRF Protection Missing',
+                'description': 'No CSRF protection tokens detected',
+                'impact': 'Attackers could perform unauthorized actions on behalf of users',
+                'recommendation': 'Implement CSRF tokens in all forms and state-changing operations',
+                'severity': 'medium'
+            },
+            'headers': {
+                'name': 'Missing Security Headers',
+                'description': 'Important security headers are missing',
+                'impact': 'Reduced protection against various attack vectors',
+                'recommendation': 'Implement security headers like X-Frame-Options, CSP, X-XSS-Protection',
+                'severity': 'medium'
+            },
+            'ssl': {
+                'name': 'SSL/TLS Issues',
+                'description': 'SSL/TLS configuration issues detected',
+                'impact': 'Communication may be intercepted or compromised',
+                'recommendation': 'Use strong SSL/TLS configuration and valid certificates',
+                'severity': 'high'
+            },
+            'directory-traversal': {
+                'name': 'Directory Traversal',
+                'description': 'Application may be vulnerable to path traversal attacks',
+                'impact': 'Attackers could access files outside the web root',
+                'recommendation': 'Validate and sanitize file paths, use allow-lists',
+                'severity': 'high',
+                'payloads': ["../../../etc/passwd", "..\\..\\..\\windows\\system32\\config\\sam", "%2e%2e%2f%2e%2e%2f", "....//....//....//etc/passwd"]
+            }
+        }
+
+    def scan_sql_injection(self) -> List[Dict]:
+        """Test for SQL injection vulnerabilities"""
+        print("[*] Testing for SQL Injection vulnerabilities...")
+        vulnerabilities = []
+        
+        try:
+            # First, get the baseline response
+            response = self.session.get(self.target_url, timeout=self.timeout, verify=False)
+            baseline_content = response.text
+            baseline_length = len(baseline_content)
+            
+            # Test URL parameters
+            parsed_url = urlparse(self.target_url)
+            if parsed_url.query:
+                for payload in self.vuln_database['sql-injection']['payloads']:
+                    test_params = {}
+                    for param in parsed_url.query.split('&'):
+                        if '=' in param:
+                            key, value = param.split('=', 1)
+                            test_params[key] = payload
+                    
+                    test_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
+                    
+                    try:
+                        test_response = self.session.get(test_url, params=test_params, timeout=self.timeout, verify=False)
+                        
+                        # Check for SQL error messages
+                        sql_errors = [
+                            "mysql_fetch_array", "ORA-01756", "Microsoft OLE DB Provider",
+                            "PostgreSQL query failed", "SQLServer JDBC Driver", "sqlite3.OperationalError",
+                            "MySQL server version", "Syntax error", "ORA-00933"
+                        ]
+                        
+                        for error in sql_errors:
+                            if error.lower() in test_response.text.lower():
+                                vulnerabilities.append({
+                                    'type': 'sql-injection',
+                                    'name': self.vuln_database['sql-injection']['name'],
+                                    'description': self.vuln_database['sql-injection']['description'],
+                                    'severity': self.vuln_database['sql-injection']['severity'],
+                                    'impact': self.vuln_database['sql-injection']['impact'],
+                                    'recommendation': self.vuln_database['sql-injection']['recommendation'],
+                                    'evidence': f"SQL error detected with payload: {payload}",
+                                    'url': test_url,
+                                    'timestamp': datetime.now().isoformat()
+                                })
+                                break
+                                
+                        # Check for significant response differences
+                        if abs(len(test_response.text) - baseline_length) > 1000:
+                            vulnerabilities.append({
+                                'type': 'sql-injection',
+                                'name': self.vuln_database['sql-injection']['name'],
+                                'description': self.vuln_database['sql-injection']['description'],
+                                'severity': self.vuln_database['sql-injection']['severity'],
+                                'impact': self.vuln_database['sql-injection']['impact'],
+                                'recommendation': self.vuln_database['sql-injection']['recommendation'],
+                                'evidence': f"Response length changed significantly with payload: {payload}",
+                                'url': test_url,
+                                'timestamp': datetime.now().isoformat()
+                            })
+                            break
+                            
+                    except requests.RequestException:
+                        continue
+                        
+        except requests.RequestException as e:
+            print(f"[!] Error testing SQL injection: {e}")
+            
+        return vulnerabilities
+
+    def scan_xss(self) -> List[Dict]:
+        """Test for XSS vulnerabilities"""
+        print("[*] Testing for XSS vulnerabilities...")
+        vulnerabilities = []
+        
+        try:
+            parsed_url = urlparse(self.target_url)
+            
+            if parsed_url.query:
+                for payload in self.vuln_database['xss']['payloads']:
+                    test_params = {}
+                    for param in parsed_url.query.split('&'):
+                        if '=' in param:
+                            key, value = param.split('=', 1)
+                            test_params[key] = payload
+                    
+                    test_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
+                    
+                    try:
+                        response = self.session.get(test_url, params=test_params, timeout=self.timeout, verify=False)
+                        
+                        # Check if payload is reflected in response
+                        if payload.lower() in response.text.lower():
+                            vulnerabilities.append({
+                                'type': 'xss',
+                                'name': self.vuln_database['xss']['name'],
+                                'description': self.vuln_database['xss']['description'],
+                                'severity': self.vuln_database['xss']['severity'],
+                                'impact': self.vuln_database['xss']['impact'],
+                                'recommendation': self.vuln_database['xss']['recommendation'],
+                                'evidence': f"XSS payload reflected in response: {payload}",
+                                'url': test_url,
+                                'timestamp': datetime.now().isoformat()
+                            })
+                            break
+                            
+                    except requests.RequestException:
+                        continue
+                        
+        except Exception as e:
+            print(f"[!] Error testing XSS: {e}")
+            
+        return vulnerabilities
+
+    def scan_csrf(self) -> List[Dict]:
+        """Test for CSRF protection"""
+        print("[*] Testing for CSRF protection...")
+        vulnerabilities = []
+        
+        try:
+            response = self.session.get(self.target_url, timeout=self.timeout, verify=False)
+            
+            # Look for forms in the response
+            forms = re.findall(r'<form[^>]*>', response.text, re.IGNORECASE)
+            
+            if forms:
+                csrf_tokens_found = False
+                
+                # Check for common CSRF token names
+                csrf_patterns = [
+                    r'name=["\']?csrf[_-]?token["\']?',
+                    r'name=["\']?_token["\']?',
+                    r'name=["\']?authenticity_token["\']?',
+                    r'name=["\']?csrfmiddlewaretoken["\']?'
+                ]
+                
+                for pattern in csrf_patterns:
+                    if re.search(pattern, response.text, re.IGNORECASE):
+                        csrf_tokens_found = True
+                        break
+                
+                if not csrf_tokens_found:
+                    vulnerabilities.append({
+                        'type': 'csrf',
+                        'name': self.vuln_database['csrf']['name'],
+                        'description': self.vuln_database['csrf']['description'],
+                        'severity': self.vuln_database['csrf']['severity'],
+                        'impact': self.vuln_database['csrf']['impact'],
+                        'recommendation': self.vuln_database['csrf']['recommendation'],
+                        'evidence': f"Found {len(forms)} form(s) without CSRF tokens",
+                        'url': self.target_url,
+                        'timestamp': datetime.now().isoformat()
+                    })
+                    
+        except requests.RequestException as e:
+            print(f"[!] Error testing CSRF: {e}")
+            
+        return vulnerabilities
+
+    def scan_security_headers(self) -> List[Dict]:
+        """Check for missing security headers"""
+        print("[*] Testing for security headers...")
+        vulnerabilities = []
+        
+        try:
+            response = self.session.get(self.target_url, timeout=self.timeout, verify=False)
+            headers = response.headers
+            
+            missing_headers = []
+            security_headers = {
+                'X-Frame-Options': 'Prevents clickjacking attacks',
+                'X-XSS-Protection': 'Enables XSS filtering',
+                'X-Content-Type-Options': 'Prevents MIME type sniffing',
+                'Strict-Transport-Security': 'Enforces HTTPS',
+                'Content-Security-Policy': 'Prevents XSS and data injection'
+            }
+            
+            for header, description in security_headers.items():
+                if header not in headers:
+                    missing_headers.append(f"{header}: {description}")
+            
+            if missing_headers:
+                vulnerabilities.append({
+                    'type': 'headers',
+                    'name': self.vuln_database['headers']['name'],
+                    'description': self.vuln_database['headers']['description'],
+                    'severity': self.vuln_database['headers']['severity'],
+                    'impact': self.vuln_database['headers']['impact'],
+                    'recommendation': self.vuln_database['headers']['recommendation'],
+                    'evidence': f"Missing headers: {', '.join([h.split(':')[0] for h in missing_headers])}",
+                    'url': self.target_url,
+                    'timestamp': datetime.now().isoformat()
+                })
+                
+        except requests.RequestException as e:
+            print(f"[!] Error testing security headers: {e}")
+            
+        return vulnerabilities
+
+    def scan_ssl_tls(self) -> List[Dict]:
+        """Check SSL/TLS configuration"""
+        print("[*] Testing SSL/TLS configuration...")
+        vulnerabilities = []
+        
+        parsed_url = urlparse(self.target_url)
+        if parsed_url.scheme != 'https':
+            vulnerabilities.append({
+                'type': 'ssl',
+                'name': self.vuln_database['ssl']['name'],
+                'description': 'Site is not using HTTPS',
+                'severity': self.vuln_database['ssl']['severity'],
+                'impact': 'All communication is sent in plain text',
+                'recommendation': 'Implement HTTPS with valid SSL certificate',
+                'evidence': 'Site accessed over HTTP instead of HTTPS',
+                'url': self.target_url,
+                'timestamp': datetime.now().isoformat()
+            })
+            return vulnerabilities
+        
+        try:
+            hostname = parsed_url.hostname
+            port = parsed_url.port or 443
+            
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            
+            with socket.create_connection((hostname, port), timeout=self.timeout) as sock:
+                with context.wrap_socket(sock, server_hostname=hostname) as ssock:
+                    cert = ssock.getpeercert()
+                    cipher = ssock.cipher()
+                    
+                    issues = []
+                    
+                    # Check for weak ciphers
+                    if cipher and cipher[1] in ['RC4', 'DES', '3DES']:
+                        issues.append(f"Weak cipher: {cipher[1]}")
+                    
+                    # Check certificate expiry (simplified)
+                    if cert:
+                        # This is a basic check - in practice you'd want more thorough validation
+                        pass
+                    
+                    if issues:
+                        vulnerabilities.append({
+                            'type': 'ssl',
+                            'name': self.vuln_database['ssl']['name'],
+                            'description': self.vuln_database['ssl']['description'],
+                            'severity': self.vuln_database['ssl']['severity'],
+                            'impact': self.vuln_database['ssl']['impact'],
+                            'recommendation': self.vuln_database['ssl']['recommendation'],
+                            'evidence': '; '.join(issues),
+                            'url': self.target_url,
+                            'timestamp': datetime.now().isoformat()
+                        })
+                        
+        except Exception as e:
+            print(f"[!] Error testing SSL/TLS: {e}")
+            
+        return vulnerabilities
+
+    def scan_directory_traversal(self) -> List[Dict]:
+        """Test for directory traversal vulnerabilities"""
+        print("[*] Testing for directory traversal...")
+        vulnerabilities = []
+        
+        try:
+            parsed_url = urlparse(self.target_url)
+            
+            if parsed_url.query:
+                for payload in self.vuln_database['directory-traversal']['payloads']:
+                    test_params = {}
+                    for param in parsed_url.query.split('&'):
+                        if '=' in param:
+                            key, value = param.split('=', 1)
+                            test_params[key] = payload
+                    
+                    test_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
+                    
+                    try:
+                        response = self.session.get(test_url, params=test_params, timeout=self.timeout, verify=False)
+                        
+                        # Check for common file contents that indicate successful traversal
+                        traversal_indicators = [
+                            'root:', 'daemon:', 'bin:', 'sys:',  # /etc/passwd indicators
+                            '[boot loader]', '[operating systems]',  # Windows boot.ini
+                            'SAM Domains', 'RID'  # Windows SAM file
+                        ]
+                        
+                        for indicator in traversal_indicators:
+                            if indicator in response.text:
+                                vulnerabilities.append({
+                                    'type': 'directory-traversal',
+                                    'name': self.vuln_database['directory-traversal']['name'],
+                                    'description': self.vuln_database['directory-traversal']['description'],
+                                    'severity': self.vuln_database['directory-traversal']['severity'],
+                                    'impact': self.vuln_database['directory-traversal']['impact'],
+                                    'recommendation': self.vuln_database['directory-traversal']['recommendation'],
+                                    'evidence': f"Directory traversal successful with payload: {payload}",
+                                    'url': test_url,
+                                    'timestamp': datetime.now().isoformat()
+                                })
+                                break
+                                
+                    except requests.RequestException:
+                        continue
+                        
+        except Exception as e:
+            print(f"[!] Error testing directory traversal: {e}")
+            
+        return vulnerabilities
+
+    def run_scan(self, scan_types: List[str] = None) -> Dict:
+        """Run the vulnerability scan"""
+        if scan_types is None:
+            scan_types = ['sql-injection', 'xss', 'csrf', 'headers', 'ssl', 'directory-traversal']
+        
+        print(f"\n[+] Starting vulnerability scan on: {self.target_url}")
+        print(f"[+] Scan types: {', '.join(scan_types)}")
+        print("-" * 60)
+        
+        start_time = time.time()
+        all_vulnerabilities = []
+        
+        # Run selected scans
+        scan_methods = {
+            'sql-injection': self.scan_sql_injection,
+            'xss': self.scan_xss,
+            'csrf': self.scan_csrf,
+            'headers': self.scan_security_headers,
+            'ssl': self.scan_ssl_tls,
+            'directory-traversal': self.scan_directory_traversal
+        }
+        
+        for scan_type in scan_types:
+            if scan_type in scan_methods:
+                try:
+                    vulnerabilities = scan_methods[scan_type]()
+                    all_vulnerabilities.extend(vulnerabilities)
+                    time.sleep(1)  # Be respectful to the target server
+                except Exception as e:
+                    print(f"[!] Error in {scan_type} scan: {e}")
+        
+        end_time = time.time()
+        scan_duration = round(end_time - start_time, 2)
+        
+        # Generate summary
+        summary = {
+            'target_url': self.target_url,
+            'scan_duration': scan_duration,
+            'timestamp': datetime.now().isoformat(),
+            'vulnerabilities': all_vulnerabilities,
+            'stats': {
+                'total': len(all_vulnerabilities),
+                'high': len([v for v in all_vulnerabilities if v['severity'] == 'high']),
+                'medium': len([v for v in all_vulnerabilities if v['severity'] == 'medium']),
+                'low': len([v for v in all_vulnerabilities if v['severity'] == 'low'])
+            }
+        }
+        
+        return summary
+
+    def print_results(self, results: Dict):
+        """Print scan results in a formatted way"""
+        print("\n" + "="*60)
+        print("VULNERABILITY SCAN RESULTS")
+        print("="*60)
+        
+        print(f"Target URL: {results['target_url']}")
+        print(f"Scan Duration: {results['scan_duration']} seconds")
+        print(f"Scan Time: {results['timestamp']}")
+        
+        stats = results['stats']
+        print(f"\nSUMMARY:")
+        print(f"  Total Vulnerabilities: {stats['total']}")
+        print(f"  High Risk: {stats['high']}")
+        print(f"  Medium Risk: {stats['medium']}")
+        print(f"  Low Risk: {stats['low']}")
+        
+        if results['vulnerabilities']:
+            print(f"\nDETAILED FINDINGS:")
+            print("-" * 60)
+            
+            for i, vuln in enumerate(results['vulnerabilities'], 1):
+                severity_indicator = {
+                    'high': '🔴',
+                    'medium': '🟡',
+                    'low': '🟢'
+                }.get(vuln['severity'], '⚪')
+                
+                print(f"\n{i}. {severity_indicator} {vuln['name']} [{vuln['severity'].upper()}]")
+                print(f"   Description: {vuln['description']}")
+                print(f"   Impact: {vuln['impact']}")
+                print(f"   Evidence: {vuln['evidence']}")
+                print(f"   Recommendation: {vuln['recommendation']}")
+                print(f"   URL: {vuln['url']}")
+                print(f"   Detected: {vuln['timestamp']}")
+        else:
+            print(f"\n✅ No vulnerabilities detected!")
+            print("Note: This doesn't guarantee the application is completely secure.")
+            print("Consider professional penetration testing for comprehensive coverage.")
+
+    def export_results(self, results: Dict, filename: str = None):
+        """Export results to JSON file"""
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"vuln_scan_{timestamp}.json"
+        
+        try:
+            with open(filename, 'w') as f:
+                json.dump(results, f, indent=2)
+            print(f"\n[+] Results exported to: {filename}")
+        except Exception as e:
+            print(f"[!] Error exporting results: {e}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Web Application Vulnerability Scanner")
+    parser.add_argument("url", help="Target URL to scan")
+    parser.add_argument("--scans", nargs="*", 
+                       choices=["sql-injection", "xss", "csrf", "headers", "ssl", "directory-traversal"],
+                       default=["sql-injection", "xss", "csrf", "headers", "ssl", "directory-traversal"],
+                       help="Vulnerability types to scan for")
+    parser.add_argument("--timeout", type=int, default=10, help="Request timeout in seconds")
+    parser.add_argument("--export", help="Export results to JSON file")
+    parser.add_argument("--quiet", action="store_true", help="Suppress output except results")
+    
+    args = parser.parse_args()
+    
+    if not args.quiet:
+        print("Web Application Vulnerability Scanner v1.0")
+        print("⚠️  WARNING: Only scan websites you own or have permission to test!")
+        print()
+    
+    # Validate URL
+    try:
+        parsed_url = urlparse(args.url)
+        if not parsed_url.scheme or not parsed_url.netloc:
+            print("[!] Invalid URL. Please include http:// or https://")
+            return
+    except Exception:
+        print("[!] Invalid URL format")
+        return
+    
+    # Initialize and run scanner
+    scanner = VulnerabilityScanner(args.url, timeout=args.timeout)
+    
+    try:
+        results = scanner.run_scan(args.scans)
+        
+        if not args.quiet:
+            scanner.print_results(results)
+        
+        if args.export:
+            scanner.export_results(results, args.export)
+        elif not args.quiet:
+            scanner.export_results(results)
+            
+    except KeyboardInterrupt:
+        print("\n[!] Scan interrupted by user")
+    except Exception as e:
+        print(f"[!] Error during scan: {e}")
+
+
+if __name__ == "__main__":
+    main()
