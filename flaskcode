@@ -1,0 +1,839 @@
+#!/usr/bin/env python3
+"""
+Flask Web Interface for Vulnerability Scanner
+A web-based interface for the Python vulnerability scanner.
+"""
+
+from flask import Flask, render_template_string, request, jsonify, send_file
+import json
+import os
+import threading
+from datetime import datetime
+import sys
+
+# Import the scanner class (assuming it's in the same directory)
+try:
+    from vuln_scanner import VulnerabilityScanner
+except ImportError:
+    print("Error: vuln_scanner.py not found. Please ensure it's in the same directory.")
+    sys.exit(1)
+
+app = Flask(__name__)
+
+# Store scan results temporarily
+scan_results_cache = {}
+active_scans = {}
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Python Web Vulnerability Scanner</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #2c3e50, #34495e);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+        
+        .main-content {
+            padding: 30px;
+        }
+        
+        .disclaimer {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            color: #856404;
+        }
+        
+        .scan-form {
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            border: 2px solid #e9ecef;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #2c3e50;
+        }
+        
+        input[type="url"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #dee2e6;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }
+        
+        input[type="url"]:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
+        .checkbox-group {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+        
+        .checkbox-item {
+            display: flex;
+            align-items: center;
+            padding: 8px;
+            background: white;
+            border-radius: 5px;
+            border: 1px solid #dee2e6;
+        }
+        
+        .checkbox-item input[type="checkbox"] {
+            margin-right: 8px;
+            width: auto;
+        }
+        
+        .scan-btn {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            padding: 15px 30px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            width: 100%;
+        }
+        
+        .scan-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.3);
+        }
+        
+        .scan-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .results-section {
+            margin-top: 30px;
+            display: none;
+        }
+        
+        .status-indicator {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            margin-right: 10px;
+            display: inline-block;
+        }
+        
+        .status-scanning {
+            background: #ffc107;
+            animation: pulse 1.5s infinite;
+        }
+        
+        .status-complete {
+            background: #28a745;
+        }
+        
+        .status-error {
+            background: #dc3545;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        
+        .summary-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin: 25px 0;
+        }
+        
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .stat-number {
+            font-size: 2em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        
+        .stat-high { color: #dc3545; }
+        .stat-medium { color: #ffc107; }
+        .stat-low { color: #28a745; }
+        .stat-total { color: #6c757d; }
+        
+        .vulnerability-card {
+            background: white;
+            border-left: 5px solid #dc3545;
+            margin-bottom: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .vulnerability-card.medium {
+            border-left-color: #ffc107;
+        }
+        
+        .vulnerability-card.low {
+            border-left-color: #28a745;
+        }
+        
+        .vuln-header {
+            padding: 15px 20px;
+            background: #f8f9fa;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+        }
+        
+        .vuln-title {
+            font-weight: 600;
+            color: #2c3e50;
+        }
+        
+        .severity-badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        
+        .severity-high {
+            background: #dc3545;
+            color: white;
+        }
+        
+        .severity-medium {
+            background: #ffc107;
+            color: #333;
+        }
+        
+        .severity-low {
+            background: #28a745;
+            color: white;
+        }
+        
+        .vuln-details {
+            padding: 20px;
+            border-top: 1px solid #dee2e6;
+            display: none;
+        }
+        
+        .detail-section {
+            margin-bottom: 15px;
+        }
+        
+        .detail-title {
+            font-weight: 600;
+            color: #495057;
+            margin-bottom: 5px;
+        }
+        
+        .detail-content {
+            color: #6c757d;
+            line-height: 1.5;
+        }
+        
+        .code-block {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            margin: 10px 0;
+            overflow-x: auto;
+        }
+        
+        .no-results {
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }
+        
+        .export-section {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        
+        .export-btn {
+            background: #28a745;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #3498db;
+            border-radius: 50%;
+            animation: spin 2s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🐍 Python Vulnerability Scanner</h1>
+            <p>Professional web application security testing tool</p>
+        </div>
+        
+        <div class="main-content">
+            <div class="disclaimer">
+                <strong>⚠️ Important Notice:</strong>
+                This tool is for educational purposes and testing your own applications only. Only scan websites you own or have explicit permission to test. Unauthorized scanning may violate terms of service or laws.
+            </div>
+            
+            <div class="scan-form">
+                <h2>Configure Security Scan</h2>
+                
+                <div class="form-group">
+                    <label for="target-url">Target URL:</label>
+                    <input type="url" id="target-url" placeholder="https://example.com" required>
+                </div>
+                
+                <div class="form-group">
+                    <label>Vulnerability Types to Check:</label>
+                    <div class="checkbox-group">
+                        <div class="checkbox-item">
+                            <input type="checkbox" id="sql-injection" checked>
+                            <label for="sql-injection">SQL Injection</label>
+                        </div>
+                        <div class="checkbox-item">
+                            <input type="checkbox" id="xss" checked>
+                            <label for="xss">Cross-Site Scripting (XSS)</label>
+                        </div>
+                        <div class="checkbox-item">
+                            <input type="checkbox" id="csrf" checked>
+                            <label for="csrf">CSRF Protection</label>
+                        </div>
+                        <div class="checkbox-item">
+                            <input type="checkbox" id="headers" checked>
+                            <label for="headers">Security Headers</label>
+                        </div>
+                        <div class="checkbox-item">
+                            <input type="checkbox" id="ssl" checked>
+                            <label for="ssl">SSL/TLS Configuration</label>
+                        </div>
+                        <div class="checkbox-item">
+                            <input type="checkbox" id="directory-traversal" checked>
+                            <label for="directory-traversal">Directory Traversal</label>
+                        </div>
+                    </div>
+                </div>
+                
+                <button class="scan-btn" onclick="startScan()">
+                    🔍 Start Security Scan
+                </button>
+            </div>
+            
+            <div class="results-section" id="results-section">
+                <div id="scan-status">
+                    <span class="status-indicator status-scanning" id="status-indicator"></span>
+                    <span id="status-text">Initializing scan...</span>
+                </div>
+                
+                <div class="summary-stats" id="summary-stats" style="display: none;">
+                    <div class="stat-card">
+                        <div class="stat-number stat-high" id="high-count">0</div>
+                        <div>High Risk</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number stat-medium" id="medium-count">0</div>
+                        <div>Medium Risk</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number stat-low" id="low-count">0</div>
+                        <div>Low Risk</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number stat-total" id="total-count">0</div>
+                        <div>Total Issues</div>
+                    </div>
+                </div>
+                
+                <div id="vulnerabilities-list"></div>
+                
+                <div class="export-section" id="export-section" style="display: none;">
+                    <h3>Export Results</h3>
+                    <button class="export-btn" onclick="exportResults('json')">Export as JSON</button>
+                    <button class="export-btn" onclick="exportResults('html')">Export as HTML</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentScanId = null;
+        let scanResults = null;
+
+        async function startScan() {
+            const url = document.getElementById('target-url').value;
+            if (!url) {
+                alert('Please enter a target URL');
+                return;
+            }
+
+            // Get selected scan types
+            const selectedScans = [];
+            document.querySelectorAll('.checkbox-item input[type="checkbox"]:checked').forEach(cb => {
+                selectedScans.push(cb.id);
+            });
+
+            if (selectedScans.length === 0) {
+                alert('Please select at least one scan type');
+                return;
+            }
+
+            // Show results section and update UI
+            document.getElementById('results-section').style.display = 'block';
+            document.getElementById('status-indicator').className = 'status-indicator status-scanning';
+            document.getElementById('status-text').textContent = 'Starting scan...';
+            document.getElementById('summary-stats').style.display = 'none';
+            document.getElementById('vulnerabilities-list').innerHTML = '';
+            document.getElementById('export-section').style.display = 'none';
+
+            // Disable scan button
+            const scanBtn = document.querySelector('.scan-btn');
+            scanBtn.disabled = true;
+            scanBtn.innerHTML = '<span class="loading"></span> Scanning...';
+
+            try {
+                // Start the scan
+                const response = await fetch('/api/scan', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        url: url,
+                        scan_types: selectedScans
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                currentScanId = data.scan_id;
+
+                // Poll for results
+                pollScanStatus();
+
+            } catch (error) {
+                console.error('Error starting scan:', error);
+                document.getElementById('status-indicator').className = 'status-indicator status-error';
+                document.getElementById('status-text').textContent = 'Error starting scan';
+                
+                scanBtn.disabled = false;
+                scanBtn.textContent = '🔍 Start Security Scan';
+            }
+        }
+
+        async function pollScanStatus() {
+            if (!currentScanId) return;
+
+            try {
+                const response = await fetch(`/api/scan/${currentScanId}/status`);
+                const data = await response.json();
+
+                document.getElementById('status-text').textContent = data.status;
+
+                if (data.completed) {
+                    // Scan completed, get results
+                    const resultsResponse = await fetch(`/api/scan/${currentScanId}/results`);
+                    scanResults = await resultsResponse.json();
+                    
+                    displayResults(scanResults);
+                } else {
+                    // Continue polling
+                    setTimeout(pollScanStatus, 2000);
+                }
+
+            } catch (error) {
+                console.error('Error polling scan status:', error);
+                document.getElementById('status-indicator').className = 'status-indicator status-error';
+                document.getElementById('status-text').textContent = 'Error during scan';
+                
+                const scanBtn = document.querySelector('.scan-btn');
+                scanBtn.disabled = false;
+                scanBtn.textContent = '🔍 Start Security Scan';
+            }
+        }
+
+        function displayResults(results) {
+            // Update status
+            document.getElementById('status-indicator').className = 'status-indicator status-complete';
+            document.getElementById('status-text').textContent = `Scan completed in ${results.scan_duration}s`;
+
+            // Update summary stats
+            const stats = results.stats;
+            document.getElementById('high-count').textContent = stats.high;
+            document.getElementById('medium-count').textContent = stats.medium;
+            document.getElementById('low-count').textContent = stats.low;
+            document.getElementById('total-count').textContent = stats.total;
+            document.getElementById('summary-stats').style.display = 'grid';
+
+            // Display vulnerabilities
+            const vulnList = document.getElementById('vulnerabilities-list');
+            
+            if (results.vulnerabilities.length === 0) {
+                vulnList.innerHTML = `
+                    <div class="no-results">
+                        <h3>✅ No vulnerabilities detected</h3>
+                        <p>The scan did not identify any of the tested vulnerability types. However, this doesn't guarantee the application is completely secure. Consider professional security testing for comprehensive coverage.</p>
+                    </div>
+                `;
+            } else {
+                vulnList.innerHTML = '';
+                results.vulnerabilities.forEach((vuln, index) => {
+                    const vulnCard = createVulnerabilityCard(vuln, index);
+                    vulnList.appendChild(vulnCard);
+                });
+            }
+
+            // Show export section
+            document.getElementById('export-section').style.display = 'block';
+
+            // Re-enable scan button
+            const scanBtn = document.querySelector('.scan-btn');
+            scanBtn.disabled = false;
+            scanBtn.textContent = '🔍 Start Security Scan';
+        }
+
+        function createVulnerabilityCard(vulnerability, index) {
+            const vulnCard = document.createElement('div');
+            vulnCard.className = `vulnerability-card ${vulnerability.severity}`;
+            
+            vulnCard.innerHTML = `
+                <div class="vuln-header" onclick="toggleVulnDetails(${index})">
+                    <div class="vuln-title">${vulnerability.name}</div>
+                    <span class="severity-badge severity-${vulnerability.severity}">${vulnerability.severity.toUpperCase()}</span>
+                </div>
+                <div class="vuln-details" id="details-${index}">
+                    <div class="detail-section">
+                        <div class="detail-title">Description</div>
+                        <div class="detail-content">${vulnerability.description}</div>
+                    </div>
+                    <div class="detail-section">
+                        <div class="detail-title">Potential Impact</div>
+                        <div class="detail-content">${vulnerability.impact}</div>
+                    </div>
+                    <div class="detail-section">
+                        <div class="detail-title">Evidence</div>
+                        <div class="code-block">${vulnerability.evidence}</div>
+                    </div>
+                    <div class="detail-section">
+                        <div class="detail-title">Recommendation</div>
+                        <div class="detail-content">${vulnerability.recommendation}</div>
+                    </div>
+                    <div class="detail-section">
+                        <div class="detail-title">URL</div>
+                        <div class="detail-content">${vulnerability.url}</div>
+                    </div>
+                    <div class="detail-section">
+                        <div class="detail-title">Detected At</div>
+                        <div class="detail-content">${new Date(vulnerability.timestamp).toLocaleString()}</div>
+                    </div>
+                </div>
+            `;
+            
+            return vulnCard;
+        }
+
+        function toggleVulnDetails(index) {
+            const details = document.getElementById(`details-${index}`);
+            if (details.style.display === 'none' || details.style.display === '') {
+                details.style.display = 'block';
+            } else {
+                details.style.display = 'none';
+            }
+        }
+
+        async function exportResults(format) {
+            if (!currentScanId) {
+                alert('No scan results to export');
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/scan/${currentScanId}/export/${format}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `vulnerability_scan_${new Date().getTime()}.${format}`;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+
+            } catch (error) {
+                console.error('Error exporting results:', error);
+                alert('Error exporting results');
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+
+@app.route('/')
+def index():
+    """Main page"""
+    return render_template_string(HTML_TEMPLATE)
+
+
+@app.route('/api/scan', methods=['POST'])
+def start_scan():
+    """Start a vulnerability scan"""
+    data = request.get_json()
+    
+    if not data or 'url' not in data:
+        return jsonify({'error': 'URL is required'}), 400
+    
+    url = data['url']
+    scan_types = data.get('scan_types', ['sql-injection', 'xss', 'csrf', 'headers', 'ssl', 'directory-traversal'])
+    
+    # Generate scan ID
+    scan_id = f"scan_{int(datetime.now().timestamp())}"
+    
+    # Initialize scan status
+    active_scans[scan_id] = {
+        'status': 'Starting scan...',
+        'completed': False,
+        'url': url,
+        'scan_types': scan_types
+    }
+    
+    # Start scan in background thread
+    thread = threading.Thread(target=run_scan_background, args=(scan_id, url, scan_types))
+    thread.daemon = True
+    thread.start()
+    
+    return jsonify({'scan_id': scan_id, 'status': 'started'})
+
+
+@app.route('/api/scan/<scan_id>/status')
+def get_scan_status(scan_id):
+    """Get scan status"""
+    if scan_id not in active_scans:
+        return jsonify({'error': 'Scan not found'}), 404
+    
+    return jsonify(active_scans[scan_id])
+
+
+@app.route('/api/scan/<scan_id>/results')
+def get_scan_results(scan_id):
+    """Get scan results"""
+    if scan_id not in scan_results_cache:
+        return jsonify({'error': 'Results not found'}), 404
+    
+    return jsonify(scan_results_cache[scan_id])
+
+
+@app.route('/api/scan/<scan_id>/export/<format>')
+def export_scan_results(scan_id, format):
+    """Export scan results"""
+    if scan_id not in scan_results_cache:
+        return jsonify({'error': 'Results not found'}), 404
+    
+    results = scan_results_cache[scan_id]
+    
+    if format == 'json':
+        # Create temporary JSON file
+        filename = f"scan_results_{scan_id}.json"
+        with open(filename, 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        return send_file(filename, as_attachment=True, download_name=f"vulnerability_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+    
+    elif format == 'html':
+        # Create HTML report
+        html_report = generate_html_report(results)
+        filename = f"scan_report_{scan_id}.html"
+        with open(filename, 'w') as f:
+            f.write(html_report)
+        
+        return send_file(filename, as_attachment=True, download_name=f"vulnerability_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
+    
+    else:
+        return jsonify({'error': 'Unsupported format'}), 400
+
+
+def run_scan_background(scan_id, url, scan_types):
+    """Run vulnerability scan in background"""
+    try:
+        # Update status
+        active_scans[scan_id]['status'] = 'Initializing scanner...'
+        
+        # Create scanner instance
+        scanner = VulnerabilityScanner(url, timeout=10)
+        
+        # Update status
+        active_scans[scan_id]['status'] = 'Running vulnerability tests...'
+        
+        # Run scan
+        results = scanner.run_scan(scan_types)
+        
+        # Store results
+        scan_results_cache[scan_id] = results
+        
+        # Update status
+        active_scans[scan_id]['status'] = 'Scan completed successfully'
+        active_scans[scan_id]['completed'] = True
+        
+    except Exception as e:
+        active_scans[scan_id]['status'] = f'Scan failed: {str(e)}'
+        active_scans[scan_id]['completed'] = True
+        active_scans[scan_id]['error'] = str(e)
+
+
+def generate_html_report(results):
+    """Generate HTML report"""
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Vulnerability Scan Report</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 40px; }}
+            .header {{ background: #2c3e50; color: white; padding: 20px; text-align: center; }}
+            .summary {{ background: #f8f9fa; padding: 20px; margin: 20px 0; }}
+            .vulnerability {{ border-left: 5px solid #dc3545; margin: 20px 0; padding: 15px; background: #fff; }}
+            .vulnerability.medium {{ border-left-color: #ffc107; }}
+            .vulnerability.low {{ border-left-color: #28a745; }}
+            .severity {{ font-weight: bold; text-transform: uppercase; }}
+            .high {{ color: #dc3545; }}
+            .medium {{ color: #ffc107; }}
+            .low {{ color: #28a745; }}
+            .evidence {{ background: #f8f9fa; padding: 10px; font-family: monospace; margin: 10px 0; }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>Vulnerability Scan Report</h1>
+            <p>Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </div>
+        
+        <div class="summary">
+            <h2>Scan Summary</h2>
+            <p><strong>Target URL:</strong> {results['target_url']}</p>
+            <p><strong>Scan Duration:</strong> {results['scan_duration']} seconds</p>
+            <p><strong>Total Vulnerabilities:</strong> {results['stats']['total']}</p>
+            <p><strong>High Risk:</strong> {results['stats']['high']}</p>
+            <p><strong>Medium Risk:</strong> {results['stats']['medium']}</p>
+            <p><strong>Low Risk:</strong> {results['stats']['low']}</p>
+        </div>
+    """
+    
+    if results['vulnerabilities']:
+        html += "<h2>Detailed Findings</h2>"
+        for i, vuln in enumerate(results['vulnerabilities'], 1):
+            html += f"""
+            <div class="vulnerability {vuln['severity']}">
+                <h3>{i}. {vuln['name']} <span class="severity {vuln['severity']}">[{vuln['severity'].upper()}]</span></h3>
+                <p><strong>Description:</strong> {vuln['description']}</p>
+                <p><strong>Impact:</strong> {vuln['impact']}</p>
+                <p><strong>Evidence:</strong></p>
+                <div class="evidence">{vuln['evidence']}</div>
+                <p><strong>Recommendation:</strong> {vuln['recommendation']}</p>
+                <p><strong>URL:</strong> {vuln['url']}</p>
+                <p><strong>Detected:</strong> {vuln['timestamp']}</p>
+            </div>
+            """
+    else:
+        html += "<p>No vulnerabilities detected.</p>"
+    
+    html += "</body></html>"
+    return html
+
+
+if __name__ == '__main__':
+    print("🐍 Python Vulnerability Scanner Web Interface")
+    print("Starting Flask server...")
+    print("Access the scanner at: http://localhost:5000")
+    print("⚠️  WARNING: Only scan websites you own or have permission to test!")
+    
+    app.run(debug=True, host='0.0.0.0', port=5000)
